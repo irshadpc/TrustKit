@@ -8,13 +8,18 @@
 
 #import "RSSwizzle.h"
 #import <objc/runtime.h>
-#import <libkern/OSAtomic.h>
+#include <dlfcn.h>
+#import <os/lock.h>
+
 
 #if !__has_feature(objc_arc)
 #error This code needs ARC. Use compiler option -fobjc-arc
 #endif
 
+
+
 #pragma mark - Block Helpers
+
 #if !defined(NS_BLOCK_ASSERTIONS)
 
 // See http://clang.llvm.org/docs/Block-ABI-Apple.html#high-level
@@ -78,7 +83,12 @@ static BOOL blockIsCompatibleWithMethodType(id block, const char *methodType){
         char *quotePtr = strchr(blockType+2, '"');
         if (NULL != quotePtr) {
             ++quotePtr;
-            char filteredType[strlen(quotePtr) + 2];
+            size_t filterTypeLen = strlen(quotePtr) + 2;
+            if (strlen(quotePtr) > filterTypeLen) { // integer overflow check
+                NSCAssert(false, @"Method signature is too long to swizzle");
+                return NO;
+            }
+            char filteredType[filterTypeLen];
             memset(filteredType, 0, sizeof(filteredType));
             *filteredType = '@';
             strncpy(filteredType + 1, quotePtr, sizeof(filteredType) - 2);
@@ -92,7 +102,7 @@ static BOOL blockIsCompatibleWithMethodType(id block, const char *methodType){
     }
     
     NSMethodSignature *methodSignature =
-        [NSMethodSignature signatureWithObjCTypes:methodType];
+    [NSMethodSignature signatureWithObjCTypes:methodType];
     
     if (!blockSignature || !methodSignature) {
         return NO;
@@ -194,21 +204,25 @@ static void swizzle(Class classToSwizzle,
               classToSwizzle);
     
     NSCAssert(blockIsAnImpFactoryBlock(factoryBlock),
-             @"Wrong type of implementation factory block.");
+              @"Wrong type of implementation factory block.");
     
-    __block OSSpinLock lock = OS_SPINLOCK_INIT;
+    __block os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    
     // To keep things thread-safe, we fill in the originalIMP later,
     // with the result of the class_replaceMethod call below.
     __block IMP originalIMP = NULL;
-
+    
     // This block will be called by the client to get original implementation and call it.
     RSSWizzleImpProvider originalImpProvider = ^IMP{
         // It's possible that another thread can call the method between the call to
         // class_replaceMethod and its return value being set.
         // So to be sure originalIMP has the right value, we need a lock.
-        OSSpinLockLock(&lock);
+        
+        os_unfair_lock_lock(&lock);
+        
         IMP imp = originalIMP;
-        OSSpinLockUnlock(&lock);
+        
+        os_unfair_lock_unlock(&lock);
         
         if (NULL == imp){
             // If the class does not implement the method
@@ -231,7 +245,7 @@ static void swizzle(Class classToSwizzle,
     const char *methodType = method_getTypeEncoding(method);
     
     NSCAssert(blockIsCompatibleWithMethodType(newIMPBlock,methodType),
-             @"Block returned from factory is not compatible with method type.");
+              @"Block returned from factory is not compatible with method type.");
     
     IMP newIMP = imp_implementationWithBlock(newIMPBlock);
     
@@ -244,10 +258,14 @@ static void swizzle(Class classToSwizzle,
     //
     // We need a lock to be sure that originalIMP has the right value in the
     // originalImpProvider block above.
-    OSSpinLockLock(&lock);
+    
+    os_unfair_lock_lock(&lock);
+    
     originalIMP = class_replaceMethod(classToSwizzle, selector, newIMP, methodType);
-    OSSpinLockUnlock(&lock);
+    
+    os_unfair_lock_unlock(&lock);
 }
+
 
 static NSMutableDictionary *swizzledClassesDictionary(){
     static NSMutableDictionary *swizzledClasses;
@@ -277,7 +295,7 @@ static NSMutableSet *swizzledClassesForKey(const void *key){
 {
     NSAssert(!(NULL == key && RSSwizzleModeAlways != mode),
              @"Key may not be NULL if mode is not RSSwizzleModeAlways.");
-
+    
     @synchronized(swizzledClassesDictionary()){
         if (key){
             NSSet *swizzledClasses = swizzledClassesForKey(key);
@@ -317,6 +335,5 @@ static NSMutableSet *swizzledClassesForKey(const void *key){
                            mode:RSSwizzleModeAlways
                             key:NULL];
 }
-
 
 @end

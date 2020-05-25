@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "assert.h"
+#include "tsk_assert.h"
 #include "string_util.h"
 #include "trie_search.h"
 
@@ -277,6 +277,7 @@ const char* GetHostnamePart(size_t offset) {
 }
 
 int HasLeafChildren(const struct TrieNode* node) {
+  if (node == NULL) { return 0; }
   if (node->first_child_offset < g_leaf_node_table_offset) return 0;
   return 1;
 }

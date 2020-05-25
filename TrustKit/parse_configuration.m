@@ -1,20 +1,22 @@
-//
-//  parse_configuration.m
-//  TrustKit
-//
-//  Created by Alban Diquet on 5/20/16.
-//  Copyright © 2016 TrustKit. All rights reserved.
-//
+/*
+ 
+ parse_configuration.m
+ TrustKit
+ 
+ Copyright 2016 The TrustKit Project Authors
+ Licensed under the MIT license, see associated LICENSE file for terms.
+ See AUTHORS file for the list of project authors.
+ 
+ */
 
-#import <Foundation/Foundation.h>
-#import "TrustKit.h"
+#import "TSKTrustKitConfig.h"
 #import "Dependencies/domain_registry/domain_registry.h"
 #import "parse_configuration.h"
-#import "Pinning/public_key_utils.h"
 #import <CommonCrypto/CommonDigest.h>
+#import "configuration_utils.h"
 
 
-NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
+NSDictionary *parseTrustKitConfiguration(NSDictionary *trustKitArguments)
 {
     // Convert settings supplied by the user to a configuration dictionary that can be used by TrustKit
     // This includes checking the sanity of the settings and converting public key hashes/pins from an
@@ -30,14 +32,11 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
     // Retrieve global settings
     
     // Should we auto-swizzle network delegates
-    NSNumber *shouldSwizzleNetworkDelegates = TrustKitArguments[kTSKSwizzleNetworkDelegates];
+    NSNumber *shouldSwizzleNetworkDelegates = trustKitArguments[kTSKSwizzleNetworkDelegates];
     if (shouldSwizzleNetworkDelegates == nil)
     {
-        // This is a required argument
-        [NSException raise:@"TrustKit configuration invalid"
-                    format:@"TrustKit was initialized without specifying the kTSKSwizzleNetworkDelegates setting. Please add this boolean entry to the root of your TrustKit configuration in order to specify if auto-swizzling of the App's connection delegates should be enabled or not; see the documentation for more information."];
-        // Default setting is YES
-        finalConfiguration[kTSKSwizzleNetworkDelegates] = @(YES);
+        // Default setting is NO
+        finalConfiguration[kTSKSwizzleNetworkDelegates] = @(NO);
     }
     else
     {
@@ -47,7 +46,7 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
     
 #if !TARGET_OS_IPHONE
     // OS X only: extract the optional ignorePinningForUserDefinedTrustAnchors setting
-    NSNumber *shouldIgnorePinningForUserDefinedTrustAnchors = TrustKitArguments[kTSKIgnorePinningForUserDefinedTrustAnchors];
+    NSNumber *shouldIgnorePinningForUserDefinedTrustAnchors = trustKitArguments[kTSKIgnorePinningForUserDefinedTrustAnchors];
     if (shouldIgnorePinningForUserDefinedTrustAnchors == nil)
     {
         // Default setting is YES
@@ -60,14 +59,14 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
 #endif
     
     // Retrieve the pinning policy for each domains
-    if ((TrustKitArguments[kTSKPinnedDomains] == nil) || ([TrustKitArguments[kTSKPinnedDomains] count] < 1))
+    if ((trustKitArguments[kTSKPinnedDomains] == nil) || ([trustKitArguments[kTSKPinnedDomains] count] < 1))
     {
         [NSException raise:@"TrustKit configuration invalid"
                     format:@"TrustKit was initialized with no pinned domains. The configuration format has changed: ensure your domain pinning policies are under the TSKPinnedDomains key within TSKConfiguration."];
     }
     
     
-    for (NSString *domainName in TrustKitArguments[kTSKPinnedDomains])
+    for (NSString *domainName in trustKitArguments[kTSKPinnedDomains])
     {
         // Sanity checks on the domain name
         if (GetRegistryLength([domainName UTF8String]) == 0)
@@ -78,8 +77,31 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
         
         
         // Retrieve the supplied arguments for this domain
-        NSDictionary *domainPinningPolicy = TrustKitArguments[kTSKPinnedDomains][domainName];
+        NSDictionary *domainPinningPolicy = trustKitArguments[kTSKPinnedDomains][domainName];
         NSMutableDictionary *domainFinalConfiguration = [[NSMutableDictionary alloc]init];
+        
+        
+        // Always start with the optional excludeSubDomain setting; if it set, no other TSKDomainConfigurationKey can be set for this domain
+        NSNumber *shouldExcludeSubdomain = domainPinningPolicy[kTSKExcludeSubdomainFromParentPolicy];
+        if (shouldExcludeSubdomain != nil && [shouldExcludeSubdomain boolValue])
+        {
+            // Confirm that no other TSKDomainConfigurationKeys were set for this domain
+            if ([[domainPinningPolicy allKeys] count] > 1)
+            {
+                [NSException raise:@"TrustKit configuration invalid"
+                            format:@"TrustKit was initialized with TSKExcludeSubdomainFromParentPolicy for domain %@ but detected additional configuration keys", domainName];
+            }
+            
+            // Store the whole configuration and continue to the next domain entry
+            domainFinalConfiguration[kTSKExcludeSubdomainFromParentPolicy] = @(YES);
+            finalConfiguration[kTSKPinnedDomains][domainName] = [NSDictionary dictionaryWithDictionary:domainFinalConfiguration];
+            continue;
+        }
+        else
+        {
+            // Default setting is NO
+            domainFinalConfiguration[kTSKExcludeSubdomainFromParentPolicy] = @(NO);
+        }
         
         
         // Extract the optional includeSubdomains setting
@@ -110,9 +132,10 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
         NSString *expirationDateStr = domainPinningPolicy[kTSKExpirationDate];
         if (expirationDateStr != nil)
         {
-            // Convert the string in the yyyy-MM-dd format into an actual date
+            // Convert the string in the yyyy-MM-dd format into an actual date in UTC
             NSDateFormatter *dateFormat = [[NSDateFormatter alloc] init];
-            [dateFormat setDateFormat:@"yyyy-MM-dd"];
+            dateFormat.dateFormat = @"yyyy-MM-dd";
+            dateFormat.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
             NSDate *expirationDate = [dateFormat dateFromString:expirationDateStr];
             domainFinalConfiguration[kTSKExpirationDate] = expirationDate;
         }
@@ -120,7 +143,7 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
         
         // Extract the optional enforcePinning setting
         NSNumber *shouldEnforcePinning = domainPinningPolicy[kTSKEnforcePinning];
-        if (shouldEnforcePinning)
+        if (shouldEnforcePinning != nil)
         {
             domainFinalConfiguration[kTSKEnforcePinning] = shouldEnforcePinning;
         }
@@ -129,11 +152,11 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
             // Default setting is YES
             domainFinalConfiguration[kTSKEnforcePinning] = @(YES);
         }
-        
+
         
         // Extract the optional disableDefaultReportUri setting
         NSNumber *shouldDisableDefaultReportUri = domainPinningPolicy[kTSKDisableDefaultReportUri];
-        if (shouldDisableDefaultReportUri)
+        if (shouldDisableDefaultReportUri != nil)
         {
             domainFinalConfiguration[kTSKDisableDefaultReportUri] = shouldDisableDefaultReportUri;
         }
@@ -142,42 +165,6 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
             // Default setting is NO
             domainFinalConfiguration[kTSKDisableDefaultReportUri] = @(NO);
         }
-        
-        
-        // Extract the list of public key algorithms to support and convert them from string to the TSKPublicKeyAlgorithm type
-        NSArray<NSString *> *publicKeyAlgsStr = domainPinningPolicy[kTSKPublicKeyAlgorithms];
-        if (publicKeyAlgsStr == nil)
-        {
-            [NSException raise:@"TrustKit configuration invalid"
-                        format:@"TrustKit was initialized with an invalid value for %@ for domain %@", kTSKPublicKeyAlgorithms, domainName];
-        }
-        NSMutableArray *publicKeyAlgs = [NSMutableArray array];
-        for (NSString *algorithm in publicKeyAlgsStr)
-        {
-            if ([kTSKAlgorithmRsa2048 isEqualToString:algorithm])
-            {
-                [publicKeyAlgs addObject:@(TSKPublicKeyAlgorithmRsa2048)];
-            }
-            else if ([kTSKAlgorithmRsa4096 isEqualToString:algorithm])
-            {
-                [publicKeyAlgs addObject:@(TSKPublicKeyAlgorithmRsa4096)];
-            }
-            else if ([kTSKAlgorithmEcDsaSecp256r1 isEqualToString:algorithm])
-            {
-                [publicKeyAlgs addObject:@(TSKPublicKeyAlgorithmEcDsaSecp256r1)];
-            }
-            else if ([kTSKAlgorithmEcDsaSecp384r1 isEqualToString:algorithm])
-            {
-                [publicKeyAlgs addObject:@(TSKPublicKeyAlgorithmEcDsaSecp384r1)];
-            }
-            else
-            {
-                [NSException raise:@"TrustKit configuration invalid"
-                            format:@"TrustKit was initialized with an invalid value for %@ for domain %@", kTSKPublicKeyAlgorithms, domainName];
-            }
-        }
-        domainFinalConfiguration[kTSKPublicKeyAlgorithms] = [NSArray arrayWithArray:publicKeyAlgs];
-        
         
         // Extract and convert the report URIs if defined
         NSArray<NSString *> *reportUriList = domainPinningPolicy[kTSKReportUris];
@@ -216,6 +203,7 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
             [serverSslPinsSet addObject:pinnedKeyHash];
         }
         
+        
         NSUInteger requiredNumberOfPins = [domainFinalConfiguration[kTSKEnforcePinning] boolValue] ? 2 : 1;
         if([serverSslPinsSet count] < requiredNumberOfPins)
         {
@@ -230,7 +218,20 @@ NSDictionary *parseTrustKitConfiguration(NSDictionary *TrustKitArguments)
         finalConfiguration[kTSKPinnedDomains][domainName] = [NSDictionary dictionaryWithDictionary:domainFinalConfiguration];
     }
     
-    return finalConfiguration;
+    // Lastly, ensure that we can find a parent policy for subdomains configured with TSKExcludeSubdomainFromParentPolicy
+    for (NSString *domainName in finalConfiguration[kTSKPinnedDomains])
+    {
+        if ([finalConfiguration[kTSKPinnedDomains][domainName][kTSKExcludeSubdomainFromParentPolicy] boolValue])
+        {
+            // To force the lookup of a parent domain, we append 'a' to this subdomain so we don't retrieve its policy
+            NSString *parentDomainConfigKey = getPinningConfigurationKeyForDomain([@"a" stringByAppendingString:domainName], finalConfiguration[kTSKPinnedDomains]);
+            if (parentDomainConfigKey == nil)
+            {
+                [NSException raise:@"TrustKit configuration invalid"
+                            format:@"TrustKit was initialized with TSKExcludeSubdomainFromParentPolicy for domain %@ but could not find a policy for a parent domain", domainName];
+            }
+        }
+    }
+
+    return [finalConfiguration copy];
 }
-
-
